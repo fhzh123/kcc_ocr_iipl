@@ -92,7 +92,7 @@ class EfficientNet(nn.Module):
             MBBlock(renew_ch(16), renew_ch(24), 6, 3, 2, renew_repeat(2), True, 0.25, drop_connect_rate),
             MBBlock(renew_ch(24), renew_ch(32), 6, 3, 2, renew_repeat(2), True, 0.25, drop_connect_rate),
             MBBlock(renew_ch(32), renew_ch(64), 6, 3, 2, renew_repeat(3), True, 0.25, drop_connect_rate),
-            MBBlock(renew_ch(64), renew_ch(128), 6, 3, 1, renew_repeat(3), True, 0.25, drop_connect_rate),
+            MBBlock(renew_ch(64), renew_ch(128), 6, 3, 3, renew_repeat(3), True, 0.25, drop_connect_rate),
             MBBlock(renew_ch(128), renew_ch(256), 6, 3, 1, renew_repeat(4), True, 0.25, drop_connect_rate),
             MBBlock(renew_ch(256), renew_ch(512), 6, 3, 1, renew_repeat(1), True, 0.25, drop_connect_rate)
         )

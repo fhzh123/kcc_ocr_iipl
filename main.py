@@ -1,15 +1,18 @@
 import argparse
+import numpy as np
 
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 
+from utils import Label_Encoder
 from recognition_architecture import recognition_architecture
 from custom_dataloader import custom_dataloader
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model_options = ['resnet18', 'resnet34', 'resnet50', 'EfficientNet']
+rnn_options = ['rnn', 'attention', 'transformer']
 dataset_options = ['ours']
 
 parser = argparse.ArgumentParser(description='CNN')
@@ -17,7 +20,9 @@ parser.add_argument('--dataset', '-d', default='ours',
                     choices=dataset_options)
 parser.add_argument('--model_type', '-a', default='EfficientNet',
                     choices=model_options)
-parser.add_argument('--batch_size', type=int, default=8,
+parser.add_argument('--rnn_type', '-r', default='attention',
+                    choices=rnn_options)
+parser.add_argument('--batch_size', type=int, default=64,
                     help='input batch size for training (default: 128)')
 parser.add_argument('--epochs', type=int, default=300,
                     help='number of epochs to train (default: 20)')
@@ -34,20 +39,29 @@ parser.add_argument('--lr_decay', type=float, default=1e-4,
 
 
 def main():
-    global args
+    global args, char_set
     
     args = parser.parse_args()
     torch.manual_seed(args.seed)
     if device == 'cuda':
         torch.cuda.manual_seed(args.seed)
 
+    
+    char_file = open('dataset/new_charset.txt', 'r', encoding='utf-16')
+    char_set = char_file.read()
+    char_file.close()
+
     if args.dataset == "ours":
-        dataset = custom_dataloader('dataset/word_image/', 'dataset/label_new.txt', model = args.model_type)
+        train_dataset = custom_dataloader('dataset/word_image/', 'dataset/label_final.txt', model = args.model_type)
+        test_dataset = custom_dataloader('dataset/test_word_image/', 'dataset/label_test.txt', model = args.model_type)
 
-    train_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
 
-    model = recognition_architecture(args.model_type)
+    model = recognition_architecture(args.model_type, args.rnn_type, 1, len(char_set), 256)
     model.cuda()
+
+    encoder = Label_Encoder()    
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
@@ -69,11 +83,9 @@ def main():
         ''' train for one epoch'''
         train_acc, train_loss = train(progress_bar, model, criterion, optimizer, epoch)
     
-        # test_acc, test_loss = test(test_loader, model, criterion)
+        test_acc, test_loss = test(test_loader, model, criterion)
 
         tqdm.write('train_loss: {0:.3f} train_acc: {1:.3f} / test_loss: {2:.3f} test_acc: {3:.3f}'.format(train_loss, train_acc, test_loss, test_acc))
-        # tqdm.write('test_loss: %.3f' % (test_loss))
-        # tqdm.write('test_acc: %.3f' % (test_acc))
 
         # row = {'epoch': str(epoch), 'train_loss': str(train_loss), 'train_acc': str(train_acc), 'test_loss': str(test_loss), 'test_acc': str(test_acc)}
         # csv_logger.writerow(row)
@@ -98,35 +110,113 @@ def train(progress_bar, model, criterion, optimizer, epoch):
     for i, (img, target) in enumerate(progress_bar):
         progress_bar.set_description('Epoch ' + str(epoch))
 
-        # measure data loading time
+        # img : 한자 묶음 image
         img = img.cuda()
-        target = target.cuda()
+
+        # target은 한자 단어
+        # ex(target : 夙駕)
+
+        char, length = encode_word(target)
+        # char은 배치의 단어를 각 한자의 index로 변환하여 하나의 tensor로 뱉음
+        # ex target : 夙駕 -> char : 0,1
+        # 여기서 index는 charset 기준 (Charset은 데이터셋에 사용된 한자들의 집합)
+        # length는 각 char의 길이
+
+        # target : [夙駕, 夙]
+        # char : [0, 1, 1] , length = [2, 1]
+        c = char.cuda()
+        l = length.cuda()
 
         img_var = torch.autograd.Variable(img, requires_grad=True)
-        target_var = torch.autograd.Variable(target)
+        target_var = torch.autograd.Variable(c)
         target_var = target_var.type(torch.long)
         target_var = target_var.squeeze()
 
-        output = model(img_var)
+        output = model(img_var, l)
 
-    #     loss = criterion(output, target_var)
-    #     output = torch.max(output.data, 1)[1]
+        loss = criterion(output, target_var)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-    #     total += target.size(0)
-    #     correct += (output == target.data).sum().item()
-    #     xentropy_loss_avg += loss.item()
+        _, output = output.max(1)
+        output = output.view(-1)
 
-    # optimizer.zero_grad()
-    # loss.backward()
-    # optimizer.step()
+        output = decode_char(output, length)
 
+        total += len(target)
+        xentropy_loss_avg += loss.item()
+
+   
     ''' Calculate running average of accuracy '''
-    # accuracy = correct / total
-    # train_loss = xentropy_loss_avg / total
+    #accuracy = correct / total
+    accuracy = 0
+    train_loss = xentropy_loss_avg / total
 
     progress_bar.set_postfix(xentropy='%.3f' % (train_loss), acc='%.3f' % accuracy)
 
     return accuracy, train_loss
+
+def test(loader, model, criterion):
+    xentropy_loss_avg = 0.
+    correct = 0.
+    total = 0.
+    losses = 0
+
+    for i, (img, target) in enumerate(loader):
+
+        # measure data loading time
+        img = img.cuda()
+
+        char, length = encode_word(target)
+        c = char.cuda()
+        l = length.cuda()
+
+        img_var = torch.autograd.Variable(img, requires_grad=True)
+        target_var = torch.autograd.Variable(c)
+        target_var = target_var.type(torch.long)
+        target_var = target_var.squeeze()
+
+        with torch.no_grad():
+            output = model(img_var, l)
+
+        loss = criterion(output, target_var)
+
+        _, output = output.max(1)
+        output = output.view(-1)
+
+        output = decode_char(output, length)
+
+        total += len(target)
+        xentropy_loss_avg += loss.item()
+
+    ''' Calculate running average of accuracy '''
+    accuracy = correct / total
+    test_loss = xentropy_loss_avg / total
+
+    return accuracy, test_loss
+
+def encode_word(target):
+    char_l = []
+    length = []
+    for word in target:
+        l = 0
+        for char in word:
+            char_l.append(char_set.index(char))
+            l = l + 1
+        length.append(l)
+    return torch.LongTensor(np.asarray(char_l)), torch.LongTensor(np.asarray(length))
+
+def decode_char(pred, length):
+    word = []
+    cnt = 0
+    for l in length:
+        w = []
+        for i in range(l):
+            w.append(pred[cnt])
+            cnt = cnt + 1
+        word.append(w)
+    return word
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
