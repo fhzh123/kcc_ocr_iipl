@@ -1,5 +1,7 @@
 import torch
 from PIL import Image
+from torch.utils.data import sampler
+
 import os
 import cv2
 import time
@@ -36,13 +38,44 @@ class custom_dataloader(Dataset):
 
     def __getitem__(self, idx):
         img = cv2.imread(self.path[idx])
-        if self.model_type.startswith('resnet'):
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            img = np.asarray(img)
-            img = np.reshape(img, (1, 48, 480))
-        elif self.model_type == 'EfficientNet':
-            img = np.asarray(img)
-            img = np.reshape(img, (3, 48, 480))
-        if len(self.label[idx]) == 0 :
-            print("len = 1", [idx])
-        return (torch.FloatTensor(img), self.label[idx])
+        img = np.reshape(img, (3, 480, 48))
+        return (img, self.label[idx])
+
+
+class alignCollate(object):
+    def __init__(self, imgH=480, imgW=48, keep_ratio=False, min_ratio=1):
+        self.imgH = imgH
+        self.imgW = imgW
+        self.keep_ratio = keep_ratio
+        self.min_ratio = min_ratio
+
+    def __call__(self, batch):
+        images, labels = zip(*batch)
+        images = torch.cat([t.unsqueeze(0) for t in images], 0)
+        print(labels)
+        return images, labels
+
+class randomSequentialSampler(sampler.Sampler):
+    
+    def __init__(self, data_source, batch_size):
+        self.num_samples = len(data_source)
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        n_batch = len(self) // self.batch_size
+        tail = len(self) % self.batch_size
+        index = torch.LongTensor(len(self)).fill_(0)
+        for i in range(n_batch):
+            random_start = random.randint(0, len(self) - self.batch_size)
+            batch_index = random_start + torch.arange(0, self.batch_size)
+            index[i * self.batch_size:(i + 1) * self.batch_size] = batch_index
+        # deal with tail
+        if tail:
+            random_start = random.randint(0, len(self) - self.batch_size)
+            tail_index = random_start + torch.arange(0, tail)
+            index[(i + 1) * self.batch_size:] = tail_index
+
+        return iter(index)
+
+    def __len__(self):
+        return self.num_samples
