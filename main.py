@@ -165,16 +165,18 @@ def train(progress_bar, model, criterion, optimizer, epoch):
         # 여기서 index는 charset 기준 (Charset은 데이터셋에 사용된 한자들의 집합)
         # length는 각 char의 길이
 
-        # target : [夙駕, 夙]
-        # char : [0, 1, 1] , length = [2, 1]
         if args.rnn_type == 'transformer':
             c = torch.LongTensor(args.batch_size, 10)
             temp = 0
+            # target : [夙駕, 夙]
+            # char : [[0, 1,4952,4952,4952,....,4952],[0,4952,4952...,4952]]
             for index_length, leng in enumerate(length):
                 c[index_length][:leng] = torch.LongTensor(char[temp : temp + leng])
-                c[index_length][leng:] = 4952
+                c[index_length][leng:] = 4952 # 4952 = pad indx
                 temp = temp + leng
         else:
+            # target : [夙駕, 夙]
+            # char : [0, 1, 0] , length = [2, 1]
             c = torch.LongTensor(char)
         c = c.cuda()
         c_var = torch.autograd.Variable(c)
