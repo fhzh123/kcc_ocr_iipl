@@ -33,7 +33,7 @@ parser.add_argument('--rnn_type', '-r', default='transformer',
                     choices=rnn_options)
 parser.add_argument('--optimizer', '-o', default='adam',
                     choices=optimizer_options)
-parser.add_argument('--batch_size', type=int, default=2,
+parser.add_argument('--batch_size', type=int, default=64,
                     help='input batch size for training (default: 128)')
 parser.add_argument('--epochs', type=int, default=300,
                     help='number of epochs to train (default: 20)')
@@ -84,7 +84,7 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,shuffle=True, pin_memory = True, num_workers=0)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
 
-    if args.rnn_type == 'transformer'
+    if args.rnn_type == 'transformer':
         model = recognition_architecture(args.model_type, args.rnn_type, 1, len(char_set) + 1, 256)
     else:
         model = recognition_architecture(args.model_type, args.rnn_type, 1, len(char_set), 256)
