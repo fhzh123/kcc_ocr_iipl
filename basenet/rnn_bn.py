@@ -47,9 +47,9 @@ class AttentionCell(nn.Module):
         emition = self.score(F.tanh(feats_proj + prev_hidden_proj).view(-1, hidden_size)).view(nT,nB).transpose(0,1)
         alpha = F.softmax(emition) # nB * nT
 
-        if self.processed_batches % 10000 == 0:
-            print('emition ', list(emition.data[0]))
-            print('alpha ', list(alpha.data[0]))
+        # if self.processed_batches % 10000 == 0:
+        #     print('emition ', list(emition.data[0]))
+        #     print('alpha ', list(alpha.data[0]))
 
         context = (feats * alpha.transpose(0,1).contiguous().view(nT,nB,1).expand(nT, nB, nC)).sum(0).squeeze(0)
         cur_hidden = self.rnn(context, prev_hidden)
@@ -84,13 +84,13 @@ class Attention(nn.Module):
         for i in range(num_steps):
             hidden, alpha = self.attention_cell(hidden, feats)
             output_hiddens[i] = hidden
-            if self.processed_batches % 500 == 0:
-                max_val, max_loc = alpha.data.max(1)
-                max_locs[i] = max_loc.cpu()
-                max_vals[i] = max_val.cpu()
-        if self.processed_batches % 500 == 0:
-            print('max_locs', list(max_locs[0:text_length.data[0],0]))
-            print('max_vals', list(max_vals[0:text_length.data[0],0]))
+            # if self.processed_batches % 500 == 0:
+            #     max_val, max_loc = alpha.data.max(1)
+            #     max_locs[i] = max_loc.cpu()
+            #     max_vals[i] = max_val.cpu()
+        # if self.processed_batches % 500 == 0:
+            # print('max_locs', list(max_locs[0:text_length.data[0],0]))
+            # print('max_vals', list(max_vals[0:text_length.data[0],0]))
         new_hiddens = Variable(torch.zeros(num_labels, hidden_size).type_as(feats.data))
         b = 0
         start = 0

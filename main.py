@@ -5,18 +5,14 @@ import numpy as np
 
 import torch
 import torch.nn as nn
+import random
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 
-from utils import Label_Encoder
 from recognition_architecture import recognition_architecture
 from custom_dataloader import custom_dataloader
 from custom_dataloader import alignCollate
 from custom_dataloader import randomSequentialSampler
-
-import warnings
-
-warnings.filterwarnings("ignore")
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model_options = ['resnet18', 'resnet34', 'resnet50', 'EfficientNet']
@@ -33,11 +29,11 @@ parser.add_argument('--rnn_type', '-r', default='transformer',
                     choices=rnn_options)
 parser.add_argument('--optimizer', '-o', default='adam',
                     choices=optimizer_options)
-parser.add_argument('--batch_size', type=int, default=64,
+parser.add_argument('--batch_size', type=int, default=128,
                     help='input batch size for training (default: 128)')
-parser.add_argument('--epochs', type=int, default=300,
+parser.add_argument('--epochs', type=int, default=500,
                     help='number of epochs to train (default: 20)')
-parser.add_argument('--lr', type=float, default=1e-3,
+parser.add_argument('--lr', type=float, default=0.01,
                     help='learning rate')
 parser.add_argument('--momentum', type=float, default=0.9,  metavar='M',
                     help='momentum')
@@ -52,14 +48,14 @@ parser.add_argument('--lr_decay', type=float, default=1e-4,
 
 
 def main():
-    global args, char_set, vocab
+    global args, char_set
     
     args = parser.parse_args()
     torch.manual_seed(args.seed)
     if device.type == 'cuda':
         torch.cuda.manual_seed(args.seed)
 
-    test_id = '20_05_02' + str(args.model_type) + '_' + str(args.rnn_type) + '_' + str(args.batch_size)
+    test_id = '20_05_03' + str(args.model_type) + '_' + str(args.rnn_type) + '_' + str(args.batch_size) + '_2'
 
     csv_path = 'logs/'
     model_path = 'checkpoints'
@@ -78,8 +74,8 @@ def main():
     print("class Num : " + str(len(char_set)))
 
     if args.dataset == "ours":
-        train_dataset = custom_dataloader('dataset/word_image/', 'dataset/label_final.txt', model = args.model_type)
-        test_dataset = custom_dataloader('dataset/test_word_image/', 'dataset/label_test.txt', model = args.model_type)
+        train_dataset = custom_dataloader('dataset/label_final.txt', model = args.model_type)
+        test_dataset = custom_dataloader( 'dataset/label_test.txt', model = args.model_type)
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,shuffle=True, pin_memory = True, num_workers=0)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
@@ -95,8 +91,6 @@ def main():
         model.cuda()
         model = torch.nn.DataParallel(model, device_ids=range(args.ngpu))
         criterion = criterion.cuda()
-
-    encoder = Label_Encoder()    
 
     # setup optimizer
     if args.optimizer == 'adam':
@@ -114,7 +108,7 @@ def main():
     filename = csv_path + '/' + test_id + '.csv'
     csv_logger = CSVLogger(args=args, fieldnames=['epoch', 'train_loss', 'test_loss', 'test_acc'], filename=filename)
 
-    best_acc = 0
+    best_loss = 100
     for epoch in range(args.epochs):
         progress_bar = tqdm(train_loader)
 
@@ -129,8 +123,8 @@ def main():
         row = {'epoch': str(epoch), 'train_loss': str(train_loss), 'test_loss': str(test_loss), 'test_acc': str(test_acc)}
         csv_logger.writerow(row)
 
-        if test_acc > best_acc:
-            best_acc = test_acc
+        if test_loss < best_loss:
+            best_loss = test_loss
             save_checkpoint({
                 'epoch': epoch,
                 'arch': args.model_type,
@@ -166,7 +160,7 @@ def train(progress_bar, model, criterion, optimizer, epoch):
         # length는 각 char의 길이
 
         if args.rnn_type == 'transformer':
-            c = torch.LongTensor(args.batch_size, 10)
+            c = torch.LongTensor(len(target), 10)
             temp = 0
             # target : [夙駕, 夙]
             # char : [[0, 1,4952,4952,4952,....,4952],[0,4952,4952...,4952]]
@@ -212,7 +206,8 @@ def test(loader, model, criterion):
     correct = 0.
     total = 0.
     losses = 0
-
+    last_c = None
+    pred = None
     for i, (img, target) in enumerate(loader):
         for p in model.parameters():
             p.requires_grad = False
@@ -227,7 +222,7 @@ def test(loader, model, criterion):
         char, length = encode_word(target)
 
         if args.rnn_type == 'transformer':
-            c = torch.LongTensor(args.batch_size, 10)
+            c = torch.LongTensor(len(target), 10)
             temp = 0
             for index_length, leng in enumerate(length):
                 c[index_length][:leng] = torch.LongTensor(char[temp : temp + leng])
@@ -252,12 +247,13 @@ def test(loader, model, criterion):
 
         if args.rnn_type == 'transformer':
             _, output = output.max(1)
-
-            correct += (output == c.data).sum().item()
+            r_index = random.randint(0, len(target) - 1)
+            pred = output[r_index]
+            last_c = target[r_index]
+            correct += ((output == c.data).sum().item())/(len(target) * 10)
         else:
             _, output = output.max(1)
             output = output.view(-1)
-
             output = output.cpu()
 
             temp = 0
@@ -269,14 +265,20 @@ def test(loader, model, criterion):
                 temp = temp + l_t
                 correct = correct + (acc / l_t)
 
-        total += len(target)
         xentropy_loss_avg += loss.item()
 
+    if args.rnn_type == 'transformer':
+        pred_output = ""
+        for p in pred:
+            if p != 4952:
+                pred_output += char_set[p]
+        tqdm.write('target : ' + pred_output + ' test output :' + last_c)
     ''' Calculate running average of accuracy '''
-    accuracy = correct / total
-    test_loss = xentropy_loss_avg / total
+    accuracy = correct / (i+1)
+    test_loss = xentropy_loss_avg / (i+1)
 
     return accuracy, test_loss
+
 
 def encode_word(target):
     char_l = []

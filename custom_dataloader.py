@@ -13,7 +13,7 @@ import random
 from torch.utils.data import Dataset
 
 class custom_dataloader(Dataset):
-    def __init__(self, image_path, label_path, model):
+    def __init__(self, label_path, model):
         start_time = time.time()
         self.model_type = model
         label_file = open(label_path, 'r', encoding='utf-16')
