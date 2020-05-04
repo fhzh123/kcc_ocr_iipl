@@ -68,18 +68,18 @@ def main():
     if not os.path.exists(model_path):
         os.makedirs(model_path)
     
-    #char_file = open('dataset/new_charset.txt', 'r', encoding='utf-16')
-    char_file = open('dataset/charset_0503.txt', 'r', encoding='utf-16')
+    char_file = open('dataset/new_charset.txt', 'r', encoding='utf-16')
+    #char_file = open('dataset/charset_0503.txt', 'r', encoding='utf-16')
     char_set = char_file.read()
     char_file.close()
 
     print("class Num : " + str(len(char_set)))
 
     if args.dataset == "ours":
-        train_dataset = custom_dataloader('dataset/label_train_0503.txt', model = args.model_type)
-        #train_dataset = custom_dataloader('dataset/label_final.txt', model = args.model_type)
-        test_dataset = custom_dataloader( 'dataset/label_test_0503.txt', model = args.model_type)
-        #test_dataset = custom_dataloader( 'dataset/label_test.txt', model = args.model_type)
+        #train_dataset = custom_dataloader('dataset/label_train_0503.txt', model = args.model_type)
+        train_dataset = custom_dataloader('dataset/label_final.txt', model = args.model_type)
+        #test_dataset = custom_dataloader( 'dataset/label_test_0503.txt', model = args.model_type)
+        test_dataset = custom_dataloader( 'dataset/label_test.txt', model = args.model_type)
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
