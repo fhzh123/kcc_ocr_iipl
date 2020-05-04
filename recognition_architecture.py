@@ -10,8 +10,11 @@ from basenet.EfficientNet import EfficientNet
 from basenet.rnn_bn import Attention, AttentionCell, BidirectionalLSTM
 
 class recognition_architecture(nn.Module):
-    def __init__(self, cnn_model_type, rnn_type,  nc = 0, nclass = 0, nh = 0, max_len = 10):
+    def __init__(self, cnn_model_type, rnn_type, num_char = 0, num_hidden = 0, max_len = 10):
         super(recognition_architecture, self).__init__()
+        self.max_len = max_len # Maximum Length
+
+        ''' Feature Extraction '''
         if cnn_model_type == 'resnet18':
             self.cnn = ResNet18()
         elif cnn_model_type == 'resnet34':
@@ -20,39 +23,39 @@ class recognition_architecture(nn.Module):
             self.cnn = ResNet50()
         elif cnn_model_type == 'EfficientNet':
             self.cnn = EfficientNet(1, 1)
+
+        self.cnn_output = 512
+        self.AdaptiveAvgPool = nn.AdaptiveAvgPool2d((None, 1))
+
+        ''' Sequence & Prediction'''
         self.rnn_type = rnn_type
+        
         if rnn_type == 'rnn':
             self.rnn = nn.Sequential(
-            BidirectionalLSTM(512, nh, nh),
-            BidirectionalLSTM(nh, nh, nclass))
+            BidirectionalLSTM(512, num_hidden, num_hidden),
+            BidirectionalLSTM(num_hidden, num_hidden, num_char))
         elif rnn_type == 'attention':
-            self.rnn = nn.Sequential(
-                BidirectionalLSTM(512, nh, nh),
-                BidirectionalLSTM(nh, nh, nh))
-            self.attention = Attention(nh, nh, nclass)
+            self.SequenceModeling = nn.Sequential(
+                BidirectionalLSTM(self.cnn_output, num_hidden, num_hidden),
+                BidirectionalLSTM(num_hidden, num_hidden, num_hidden))
+            self.SequenceModeling_output = num_hidden
+            self.Prediction = Attention(self.SequenceModeling_output, num_hidden, num_char)
         elif rnn_type == 'transformer':
             # Transformer model setting
             # Need to fix Hyperparameter & vocab_num & etc
             self.transformer = nn.Transformer(d_model=512, nhead=8, num_encoder_layers=6, 
                                             num_decoder_layers=6, dim_feedforward=2048, 
                                             dropout=0.1, activation='gelu')
-            self.embedding = nn.Embedding(nclass + 1, 512)
-            self.output_linear = nn.Linear(512, nclass, bias=False)
+            self.embedding = nn.Embedding(num_char, 512)
+            self.output_linear = nn.Linear(512, num_char, bias=False)
+            self.softmax = nn.LogSoftmax(2)
 
-            self.max_len = 10 # Maximum Length
             # self.bos_idx = bos_idx # Start token of sentence
             # self.eos_idx = eos_idx # End token of sentece
-            self.pad_idx = 4952 # Padding token of sentece
-
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal(m.weight, mode='fan_out', a=0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant(m.weight, 1)
-                nn.init.constant(m.bias, 0)
+            self.pad_idx = 0 # Padding token of sentece
 
         
-    def forward(self, x, length, trg = None):
+    def forward(self, x, trg = None, is_train=True):
         ''' (Batch, 3, 480, 48) '''
         features = self.cnn(x)
         ''' (Batch, 512, 10, 1) ''' 
@@ -62,15 +65,13 @@ class recognition_architecture(nn.Module):
             b, c, h, w = features.size()
             features = features.squeeze(3)
             features = features.permute(2, 0, 1)  # [h, b, c]
-            output = output = self.rnn(features)
+            output = self.rnn(features)
         elif self.rnn_type == 'attention':     
-            ''' 아직 정확하게 구조,원리 파악은 하지 못했고 돌아가게끔만 수정해놓은 상태
-            학습이 잘될지는 돌려놓고 자서 일어나보고 확인해보겠습니다.. '''
-            b, c, h, w = features.size()
-            features = features.squeeze(3)
-            features = features.permute(2, 0, 1)  # [h, b, c]
-            rnn = self.rnn(features)
-            output = self.attention(rnn, length)
+            visual_feature = self.AdaptiveAvgPool(features.permute(0, 2, 1, 3))  # [b, c, h, w] -> [b, h, c, w]
+            visual_feature = visual_feature.squeeze(3)
+
+            contextual_feature = self.SequenceModeling(visual_feature)
+            output = self.Prediction(contextual_feature.contiguous(), trg, is_train, batch_max_length=self.max_len)
         elif self.rnn_type == 'transformer':
             #====================================#
             #======Transformer (By Kyohoon)======#
@@ -78,7 +79,8 @@ class recognition_architecture(nn.Module):
 
             # 1) Feature reshape
             batch_size = features.size(0)
-            features = features.view(10, batch_size, 512) # (W*H, Batch, Feature)
+            features = features.squeeze(3)
+            features = features.permute(2, 0, 1)  # [h, b, c]
 
             # 2) Target preprocessing
             trg_emb = self.embedding(trg)
@@ -89,7 +91,7 @@ class recognition_architecture(nn.Module):
             output = self.transformer(features, trg_emb, tgt_key_padding_mask=trg_key_padding_mask)
             output = torch.einsum('ijk->jik', output)
             output = self.output_linear(output)
-            output = torch.einsum('ijk->ikj', output)
+            output = self.softmax(output)
 
         return output
 

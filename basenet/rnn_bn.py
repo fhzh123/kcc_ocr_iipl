@@ -5,98 +5,97 @@ import torch.nn.functional as F
 
 from torch.autograd import Variable
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 class BidirectionalLSTM(nn.Module):
     
-    def __init__(self, nIn, nHidden, nOut):
+    def __init__(self, input_size, hidden_size, output_size):
         super(BidirectionalLSTM, self).__init__()
-
-        self.rnn = nn.LSTM(nIn, nHidden, bidirectional=True)
-        self.embedding = nn.Linear(nHidden * 2, nOut)
+        self.rnn = nn.LSTM(input_size, hidden_size, bidirectional=True, batch_first=True)
+        self.linear = nn.Linear(hidden_size * 2, output_size)
 
     def forward(self, input):
-        recurrent, _ = self.rnn(input)
-        T, b, h = recurrent.size()
-        t_rec = recurrent.view(T * b, h)
-
-        output = self.embedding(t_rec)  # [T * b, nOut]
-        output = output.view(T, b, -1)
-
+        """
+        input : visual feature [batch_size x T x input_size]
+        output : contextual feature [batch_size x T x output_size]
+        """
+        self.rnn.flatten_parameters()
+        recurrent, _ = self.rnn(input)  # batch_size x T x input_size -> batch_size x T x (2*hidden_size)
+        output = self.linear(recurrent)  # batch_size x T x output_size
         return output
 
-class AttentionCell(nn.Module):
-    def __init__(self, input_size, hidden_size):
-        super(AttentionCell, self).__init__()
-        self.i2h = nn.Linear(input_size, hidden_size,bias=False)
-        self.h2h = nn.Linear(hidden_size, hidden_size)
-        self.score = nn.Linear(hidden_size, 1, bias=False)
-        self.rnn = nn.GRUCell(input_size, hidden_size)
-        self.hidden_size = hidden_size
-        self.input_size = input_size
-        self.processed_batches = 0
-
-    def forward(self, prev_hidden, feats):
-        self.processed_batches = self.processed_batches + 1
-        nT = feats.size(0)
-        nB = feats.size(1)
-        nC = feats.size(2)
-        hidden_size = self.hidden_size
-        input_size = self.input_size
-
-        feats_proj = self.i2h(feats.view(-1,nC))
-        prev_hidden_proj = self.h2h(prev_hidden).view(1,nB, hidden_size).expand(nT, nB, hidden_size).contiguous().view(-1, hidden_size)
-        emition = self.score(F.tanh(feats_proj + prev_hidden_proj).view(-1, hidden_size)).view(nT,nB).transpose(0,1)
-        alpha = F.softmax(emition) # nB * nT
-
-        # if self.processed_batches % 10000 == 0:
-        #     print('emition ', list(emition.data[0]))
-        #     print('alpha ', list(alpha.data[0]))
-
-        context = (feats * alpha.transpose(0,1).contiguous().view(nT,nB,1).expand(nT, nB, nC)).sum(0).squeeze(0)
-        cur_hidden = self.rnn(context, prev_hidden)
-        return cur_hidden, alpha
-
 class Attention(nn.Module):
+    
     def __init__(self, input_size, hidden_size, num_classes):
         super(Attention, self).__init__()
-        self.attention_cell = AttentionCell(input_size, hidden_size)
-        self.input_size = input_size
+        self.attention_cell = AttentionCell(input_size, hidden_size, num_classes)
         self.hidden_size = hidden_size
+        self.num_classes = num_classes
         self.generator = nn.Linear(hidden_size, num_classes)
-        self.processed_batches = 0
 
-    def forward(self, feats, text_length):
-        self.processed_batches = self.processed_batches + 1
-        nT = feats.size(0)
-        nB = feats.size(1)
-        nC = feats.size(2)
-        hidden_size = self.hidden_size
-        input_size = self.input_size
-        assert(input_size == nC)
-        assert(nB == text_length.numel())
+    def _char_to_onehot(self, input_char, onehot_dim=38):
+        input_char = input_char.unsqueeze(1)
+        batch_size = input_char.size(0)
+        one_hot = torch.FloatTensor(batch_size, onehot_dim).zero_().to(device)
+        one_hot = one_hot.scatter_(1, input_char, 1)
+        return one_hot
 
-        num_steps = text_length.data.max()
-        num_labels = text_length.data.sum()
+    def forward(self, batch_H, text, is_train=True, batch_max_length=25):
+        """
+        input:
+            batch_H : contextual_feature H = hidden state of encoder. [batch_size x num_steps x num_classes]
+            text : the text-index of each image. [batch_size x (max_length+1)]. +1 for [GO] token. text[:, 0] = [GO].
+        output: probability distribution at each step [batch_size x num_steps x num_classes]
+        """
+        batch_size = batch_H.size(0)
+        num_steps = batch_max_length + 1  # +1 for [s] at end of sentence.
 
-        output_hiddens = Variable(torch.zeros(num_steps, nB, hidden_size).type_as(feats.data))
-        hidden = Variable(torch.zeros(nB,hidden_size).type_as(feats.data))
-        max_locs = torch.zeros(num_steps, nB)
-        max_vals = torch.zeros(num_steps, nB)
-        for i in range(num_steps):
-            hidden, alpha = self.attention_cell(hidden, feats)
-            output_hiddens[i] = hidden
-            # if self.processed_batches % 500 == 0:
-            #     max_val, max_loc = alpha.data.max(1)
-            #     max_locs[i] = max_loc.cpu()
-            #     max_vals[i] = max_val.cpu()
-        # if self.processed_batches % 500 == 0:
-            # print('max_locs', list(max_locs[0:text_length.data[0],0]))
-            # print('max_vals', list(max_vals[0:text_length.data[0],0]))
-        new_hiddens = Variable(torch.zeros(num_labels, hidden_size).type_as(feats.data))
-        b = 0
-        start = 0
-        for length in text_length.data:
-            new_hiddens[start:start+length] = output_hiddens[0:length,b,:]
-            start = start + length
-            b = b + 1
-        probs = self.generator(new_hiddens)
-        return probs
+        output_hiddens = torch.FloatTensor(batch_size, num_steps, self.hidden_size).fill_(0).to(device)
+        hidden = (torch.FloatTensor(batch_size, self.hidden_size).fill_(0).to(device),
+                  torch.FloatTensor(batch_size, self.hidden_size).fill_(0).to(device))
+
+        if is_train:
+            for i in range(num_steps):
+                # one-hot vectors for a i-th char. in a batch
+                char_onehots = self._char_to_onehot(text[:, i], onehot_dim=self.num_classes)
+                # hidden : decoder's hidden s_{t-1}, batch_H : encoder's hidden H, char_onehots : one-hot(y_{t-1})
+                hidden, alpha = self.attention_cell(hidden, batch_H, char_onehots)
+                output_hiddens[:, i, :] = hidden[0]  # LSTM hidden index (0: hidden, 1: Cell)
+            probs = self.generator(output_hiddens)
+
+        else:
+            targets = torch.LongTensor(batch_size).fill_(0).to(device)  # [GO] token
+            probs = torch.FloatTensor(batch_size, num_steps, self.num_classes).fill_(0).to(device)
+
+            for i in range(num_steps):
+                char_onehots = self._char_to_onehot(targets, onehot_dim=self.num_classes)
+                hidden, alpha = self.attention_cell(hidden, batch_H, char_onehots)
+                probs_step = self.generator(hidden[0])
+                probs[:, i, :] = probs_step
+                _, next_input = probs_step.max(1)
+                targets = next_input
+
+        return probs  # batch_size x num_steps x num_classes
+
+
+class AttentionCell(nn.Module):
+
+    def __init__(self, input_size, hidden_size, num_embeddings):
+        super(AttentionCell, self).__init__()
+        self.i2h = nn.Linear(input_size, hidden_size, bias=False)
+        self.h2h = nn.Linear(hidden_size, hidden_size)  # either i2i or h2h should have bias
+        self.score = nn.Linear(hidden_size, 1, bias=False)
+        self.rnn = nn.LSTMCell(input_size + num_embeddings, hidden_size)
+        self.hidden_size = hidden_size
+
+    def forward(self, prev_hidden, batch_H, char_onehots):
+        # [batch_size x num_encoder_step x num_channel] -> [batch_size x num_encoder_step x hidden_size]
+        batch_H_proj = self.i2h(batch_H)
+        prev_hidden_proj = self.h2h(prev_hidden[0]).unsqueeze(1)
+        e = self.score(torch.tanh(batch_H_proj + prev_hidden_proj))  # batch_size x num_encoder_step * 1
+
+        alpha = F.softmax(e, dim=1)
+        context = torch.bmm(alpha.permute(0, 2, 1), batch_H).squeeze(1)  # batch_size x num_channel
+        concat_context = torch.cat([context, char_onehots], 1)  # batch_size x (num_channel + num_embedding)
+        cur_hidden = self.rnn(concat_context, prev_hidden)
+        return cur_hidden, alpha

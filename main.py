@@ -5,6 +5,7 @@ import numpy as np
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import random
 from tqdm import tqdm
 from torch.utils.data import DataLoader
@@ -27,13 +28,13 @@ parser.add_argument('--model_type', '-a', default='EfficientNet',
                     choices=model_options)
 parser.add_argument('--rnn_type', '-r', default='transformer',
                     choices=rnn_options)
-parser.add_argument('--optimizer', '-o', default='adam',
+parser.add_argument('--optimizer', '-o', default='adadelta',
                     choices=optimizer_options)
-parser.add_argument('--batch_size', type=int, default=128,
+parser.add_argument('--batch_size', type=int, default=64,
                     help='input batch size for training (default: 128)')
 parser.add_argument('--epochs', type=int, default=500,
                     help='number of epochs to train (default: 20)')
-parser.add_argument('--lr', type=float, default=0.01,
+parser.add_argument('--lr', type=float, default=1,
                     help='learning rate')
 parser.add_argument('--momentum', type=float, default=0.9,  metavar='M',
                     help='momentum')
@@ -48,14 +49,14 @@ parser.add_argument('--lr_decay', type=float, default=1e-4,
 
 
 def main():
-    global args, char_set
+    global args, char_set, converter
     
     args = parser.parse_args()
     torch.manual_seed(args.seed)
     if device.type == 'cuda':
         torch.cuda.manual_seed(args.seed)
 
-    test_id = '20_05_03' + str(args.model_type) + '_' + str(args.rnn_type) + '_' + str(args.batch_size) + '_2'
+    test_id = '20_05_04' + str(args.model_type) + '_' + str(args.rnn_type) + '_' + str(args.batch_size) + '_2'
 
     csv_path = 'logs/'
     model_path = 'checkpoints'
@@ -67,35 +68,57 @@ def main():
     if not os.path.exists(model_path):
         os.makedirs(model_path)
     
-    char_file = open('dataset/new_charset.txt', 'r', encoding='utf-16')
+    #char_file = open('dataset/new_charset.txt', 'r', encoding='utf-16')
+    char_file = open('dataset/charset_0503.txt', 'r', encoding='utf-16')
     char_set = char_file.read()
     char_file.close()
 
     print("class Num : " + str(len(char_set)))
 
     if args.dataset == "ours":
-        train_dataset = custom_dataloader('dataset/label_final.txt', model = args.model_type)
-        test_dataset = custom_dataloader( 'dataset/label_test.txt', model = args.model_type)
+        train_dataset = custom_dataloader('dataset/label_train_0503.txt', model = args.model_type)
+        #train_dataset = custom_dataloader('dataset/label_final.txt', model = args.model_type)
+        test_dataset = custom_dataloader( 'dataset/label_test_0503.txt', model = args.model_type)
+        #test_dataset = custom_dataloader( 'dataset/label_test.txt', model = args.model_type)
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size,shuffle=True, pin_memory = True, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size,shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
 
-    if args.rnn_type == 'transformer':
-        model = recognition_architecture(args.model_type, args.rnn_type, 1, len(char_set) + 1, 256)
-    else:
-        model = recognition_architecture(args.model_type, args.rnn_type, 1, len(char_set), 256)
+    model = recognition_architecture(args.model_type, args.rnn_type, len(char_set) + 2, 256, 10)
 
-    criterion = nn.CrossEntropyLoss().cuda()
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=0).cuda()
+    #criterion = nn.NLLLoss().cuda()
 
     if device.type == 'cuda':
         model.cuda()
         model = torch.nn.DataParallel(model, device_ids=range(args.ngpu))
-        criterion = criterion.cuda()
+
+    # weight initialization
+    for name, param in model.named_parameters():
+        if 'localization_fc2' in name:
+            print(f'Skip {name} as it is already initialized')
+            continue
+        try:
+            if 'bias' in name:
+                init.constant_(param, 0.0)
+            elif 'weight' in name:
+                init.kaiming_normal_(param)
+        except Exception as e:  # for batchnorm.
+            if 'weight' in name:
+                param.data.fill_(1)
+            continue
+
+    filtered_parameters = []
+    params_num = []
+    for p in filter(lambda p: p.requires_grad, model.parameters()):
+        filtered_parameters.append(p)
+        params_num.append(np.prod(p.size()))
+    print('Trainable params num : ', sum(params_num))
 
     # setup optimizer
     if args.optimizer == 'adam':
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
-                            betas=(0.5, 0.999))
+                            betas=(0.9, 0.999))
     elif args.optimizer == 'adadelta':
         optimizer = torch.optim.Adadelta(model.parameters(), lr=args.lr,)
     elif args.optimizer == 'rms':
@@ -108,15 +131,20 @@ def main():
     filename = csv_path + '/' + test_id + '.csv'
     csv_logger = CSVLogger(args=args, fieldnames=['epoch', 'train_loss', 'test_loss', 'test_acc'], filename=filename)
 
+    converter = AttnLabelConverter(char_set)
+
     best_loss = 100
     for epoch in range(args.epochs):
         progress_bar = tqdm(train_loader)
 
         #adjust_learning_rate(optimizer, epoch)
         ''' train for one epoch'''
+        model.train()
         train_loss = train(progress_bar, model, criterion, optimizer, epoch)
     
-        test_acc, test_loss = test(test_loader, model, criterion)
+        model.eval()
+        with torch.no_grad():
+            test_acc, test_loss = test(test_loader, model, criterion)
 
         tqdm.write('train_loss: {0:.3f} / test_loss: {1:.3f} test_acc: {2:.3f}'.format(train_loss, test_loss, test_acc))
 
@@ -140,51 +168,15 @@ def train(progress_bar, model, criterion, optimizer, epoch):
     losses = 0
 
     for i, (img, target) in enumerate(progress_bar):
-        for p in model.parameters():
-            p.requires_grad = True
-
-        model.train()
-
-        # img : 한자 묶음 image
         img = torch.FloatTensor(np.asarray(img))
         img = img.cuda()
-        img_var = torch.autograd.Variable(img)
 
-        # target은 한자 단어
-        # ex(target : 夙駕)
+        text, length = converter.encode(target, batch_max_length=10)
 
-        char, length = encode_word(target)
-        # char은 배치의 단어를 각 한자의 index로 변환하여 하나의 tensor로 뱉음
-        # ex target : 夙駕 -> char : 0,1
-        # 여기서 index는 charset 기준 (Charset은 데이터셋에 사용된 한자들의 집합)
-        # length는 각 char의 길이
+        output = model(img, trg = text[:, :-1])
+        labels = text[:, 1:]  # without [GO] Symbol
+        loss = criterion(output.view(-1, output.shape[-1]), labels.contiguous().view(-1))
 
-        if args.rnn_type == 'transformer':
-            c = torch.LongTensor(len(target), 10)
-            temp = 0
-            # target : [夙駕, 夙]
-            # char : [[0, 1,4952,4952,4952,....,4952],[0,4952,4952...,4952]]
-            for index_length, leng in enumerate(length):
-                c[index_length][:leng] = torch.LongTensor(char[temp : temp + leng])
-                c[index_length][leng:] = 4952 # 4952 = pad indx
-                temp = temp + leng
-        else:
-            # target : [夙駕, 夙]
-            # char : [0, 1, 0] , length = [2, 1]
-            c = torch.LongTensor(char)
-        c = c.cuda()
-        c_var = torch.autograd.Variable(c)
-
-        l = torch.LongTensor(length)
-        l = length.cuda()
-        l_var = torch.autograd.Variable(l)
-
-        if args.rnn_type == 'transformer':
-            output = model(img_var, l_var, c_var)
-        else:
-            output = model(img_var, l_var)
-
-        loss = criterion(output, c_var)
         model.zero_grad()
         loss.backward()
         optimizer.step()
@@ -207,131 +199,100 @@ def test(loader, model, criterion):
     total = 0.
     losses = 0
     last_c = None
-    pred = None
+    output_pred = None
     for i, (img, target) in enumerate(loader):
-        for p in model.parameters():
-            p.requires_grad = False
+        batch_size = len(target)
 
-        model.eval()
+        # For max length prediction
+        length_for_pred = torch.IntTensor([10] * batch_size).to(device)
+        text_for_pred = torch.LongTensor(batch_size, 10 + 1).fill_(0).to(device)
+
+        text_for_loss, length_for_loss = converter.encode(target, batch_max_length=10)
 
         # measure data loading time
         img = torch.FloatTensor(np.asarray(img))
         img = img.cuda()
-        img_var = torch.autograd.Variable(img)
 
-        char, length = encode_word(target)
+        preds = model(img, trg = text_for_pred, is_train=False)
 
-        if args.rnn_type == 'transformer':
-            c = torch.LongTensor(len(target), 10)
-            temp = 0
-            for index_length, leng in enumerate(length):
-                c[index_length][:leng] = torch.LongTensor(char[temp : temp + leng])
-                c[index_length][leng:] = 4952
-                temp = temp + leng
-        else:
-            c = torch.LongTensor(char)
-        c = c.cuda()
-        c_var = torch.autograd.Variable(c)
+        preds = preds[:, :text_for_loss.shape[1] - 1, :]
+        label = text_for_loss[:, 1:]  # without [GO] Symbol
+        loss = criterion(preds.contiguous().view(-1, preds.shape[-1]), label.contiguous().view(-1))
 
-        l = torch.LongTensor(length)
-        l = length.cuda()
-        l_var = torch.autograd.Variable(l)
+        # select max probabilty (greedy decoding) then decode index to character
+        _, preds_index = preds.max(2)
+        preds_str = converter.decode(preds_index, length_for_pred)
+        labels = converter.decode(text_for_loss[:, 1:], length_for_loss)
+        r_index = random.randint(0, len(target) - 1)
+        output_pred = preds_str[r_index]
+        last_c = labels[r_index]
 
-        with torch.no_grad():
-            if args.rnn_type == 'transformer':
-                output = model(img_var, l_var, c_var)
-            else:
-                output = model(img_var, l_var)
-
-        loss = criterion(output, c_var)
-
-        if args.rnn_type == 'transformer':
-            _, output = output.max(1)
-            r_index = random.randint(0, len(target) - 1)
-            pred = output[r_index]
-            last_c = target[r_index]
-            correct += ((output == c.data).sum().item())/(len(target) * 10)
-        else:
-            _, output = output.max(1)
-            output = output.view(-1)
-            output = output.cpu()
-
-            temp = 0
-            for l_t in length:
-                acc = 0
-                for l_p in range(l_t):
-                    if output[temp + l_p] == char[temp + l_p]:
-                        acc = acc + 1
-                temp = temp + l_t
-                correct = correct + (acc / l_t)
+        # calculate accuracy & confidence score
+        preds_prob = F.softmax(preds, dim=2)
+        preds_max_prob, _ = preds_prob.max(dim=2)
+        confidence_score_list = []
+        for gt, pred, pred_max_prob in zip(labels, preds_str, preds_max_prob):
+            gt = gt[:gt.find('[s]')]
+            pred_EOS = pred.find('[s]')
+            pred = pred[:pred_EOS]  # prune after "end of sentence" token ([s])
+            pred_max_prob = pred_max_prob[:pred_EOS]
+            
+            if pred == gt:
+                correct += 1
 
         xentropy_loss_avg += loss.item()
 
-    if args.rnn_type == 'transformer':
-        pred_output = ""
-        for p in pred:
-            if p != 4952:
-                pred_output += char_set[p]
-        tqdm.write('target : ' + pred_output + ' test output :' + last_c)
+    tqdm.write('target : ' + output_pred + ' test output :' + last_c)
     ''' Calculate running average of accuracy '''
     accuracy = correct / (i+1)
     test_loss = xentropy_loss_avg / (i+1)
 
     return accuracy, test_loss
 
+class AttnLabelConverter(object):
+    """ Convert between text-label and text-index """
 
-def encode_word(target):
-    char_l = []
-    length = []
-    for word in target:
-        l = 0
-        for char in word:
-            char_l.append(char_set.index(char))
-            l = l + 1
-        length.append(l)
-    return torch.LongTensor(np.asarray(char_l)), torch.LongTensor(np.asarray(length))
+    def __init__(self, character):
+        # character (str): set of the possible characters.
+        # [GO] for the start token of the attention decoder. [s] for end-of-sentence token.
+        list_token = ['[GO]', '[s]']  # ['[s]','[UNK]','[PAD]','[GO]']
+        list_character = list(character)
+        self.character = list_token + list_character
 
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
+        self.dict = {}
+        for i, char in enumerate(self.character):
+            # print(i, char)
+            self.dict[char] = i
 
-    def __init__(self):
-        self.reset()
+    def encode(self, text, batch_max_length=25):
+        """ convert text-label into text-index.
+        input:
+            text: text labels of each image. [batch_size]
+            batch_max_length: max length of text label in the batch. 25 by default
+        output:
+            text : the input of attention decoder. [batch_size x (max_length+2)] +1 for [GO] token and +1 for [s] token.
+                text[:, 0] is [GO] token and text is padded with [GO] token after [s] token.
+            length : the length of output of attention decoder, which count [s] token also. [3, 7, ....] [batch_size]
+        """
+        length = [len(s) + 1 for s in text]  # +1 for [s] at end of sentence.
+        # batch_max_length = max(length) # this is not allowed for multi-gpu setting
+        batch_max_length += 1
+        # additional +1 for [GO] at first step. batch_text is padded with [GO] token after [s] token.
+        batch_text = torch.LongTensor(len(text), batch_max_length + 1).fill_(0)
+        for i, t in enumerate(text):
+            text = list(t)
+            text.append('[s]')
+            text = [self.dict[char] for char in text]
+            batch_text[i][1:1 + len(text)] = torch.LongTensor(text)  # batch_text[:, 0] = [GO] token
+        return (batch_text.to(device), torch.IntTensor(length).to(device))
 
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-
-def accuracy(output, target, topk=(1,)):
-    """Computes the precision@k for the specified values of k"""
-    maxk = max(topk)
-    batch_size = target.size(0)
-
-    _, pred = output.topk(maxk, 1, True, True)
-    pred = pred.t()
-    correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-    res = []
-    for k in topk:
-        correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
-        wrong_k = batch_size - correct_k
-        res.append(wrong_k.mul_(100.0 / batch_size))
-
-    return res
-
-def adjust_learning_rate(optimizer, epoch):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    lr = args.lr * (0.1 ** (epoch // 200))
-
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+    def decode(self, text_index, length):
+        """ convert text-index into text-label. """
+        texts = []
+        for index, l in enumerate(length):
+            text = ''.join([self.character[i] for i in text_index[index, :]])
+            texts.append(text)
+        return texts
 
 class CSVLogger():
     def __init__(self, args, fieldnames, filename='log.csv'):
