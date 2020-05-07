@@ -11,3 +11,6 @@ python train.py --train_data result/train_last --valid_data result/test_last --T
 
 CNN 모델 변경하려면 model.py랑 module/feature_extraction.py 수정후
 명령어에 --FeatureExtraction [새로운 ] 수정하면 됩니다.
+
+dependency
+pip3 install lmdb pillow nltk natsort
