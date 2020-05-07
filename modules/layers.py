@@ -14,7 +14,6 @@ def conv_bn_act(in_, out_, kernel_size,
         Swish()
     )
 
-
 class SamePadConv2d(nn.Conv2d):
     """
     Conv with TF padding='same'
@@ -81,3 +80,55 @@ class DropConnect(nn.Module):
         random_tensor += torch.rand([x.shape[0], 1, 1, 1], dtype=torch.float, device=x.device)
         random_tensor.requires_grad_(False)
         return x / self.ratio * random_tensor.floor()
+
+class MBConv(nn.Module):
+    def __init__(self, in_, out_, expand,
+                 kernel_size, stride, skip,
+                 se_ratio, dc_ratio=0.2):
+        super().__init__()
+        mid_ = in_ * expand
+        self.expand_conv = conv_bn_act(in_, mid_, kernel_size=1, bias=False) if expand != 1 else nn.Identity()
+
+        self.depth_wise_conv = conv_bn_act(mid_, mid_,
+                                           kernel_size=kernel_size, stride=stride,
+                                           groups=mid_, bias=False)
+
+        self.se = SEModule(mid_, int(in_ * se_ratio)) if se_ratio > 0 else nn.Identity()
+
+        self.project_conv = nn.Sequential(
+            SamePadConv2d(mid_, out_, kernel_size=1, stride=1, bias=False),
+            nn.BatchNorm2d(out_, 1e-3, 0.01)
+        )
+
+        # if _block_args.id_skip:
+        # and all(s == 1 for s in self._block_args.strides)
+        # and self._block_args.input_filters == self._block_args.output_filters:
+        self.skip = skip and (stride == 1) and (in_ == out_)
+
+        # DropConnect
+        # self.dropconnect = DropConnect(dc_ratio) if dc_ratio > 0 else nn.Identity()
+        # Original TF Repo not using drop_rate
+        # https://github.com/tensorflow/tpu/blob/05f7b15cdf0ae36bac84beb4aef0a09983ce8f66/models/official/efficientnet/efficientnet_model.py#L408
+        self.dropconnect = nn.Identity()
+
+    def forward(self, inputs):
+        expand = self.expand_conv(inputs)
+        x = self.depth_wise_conv(expand)
+        x = self.se(x)
+        x = self.project_conv(x)
+        if self.skip:
+            x = self.dropconnect(x)
+            x = x + inputs
+        return x
+
+
+class MBBlock(nn.Module):
+    def __init__(self, in_, out_, expand, kernel, stride, num_repeat, skip, se_ratio, drop_connect_ratio=0.2):
+        super().__init__()
+        layers = [MBConv(in_, out_, expand, kernel, stride, skip, se_ratio, drop_connect_ratio)]
+        for i in range(1, num_repeat):
+            layers.append(MBConv(out_, out_, expand, kernel, 1, skip, se_ratio, drop_connect_ratio))
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.layers(x)
