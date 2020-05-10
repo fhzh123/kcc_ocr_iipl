@@ -23,9 +23,7 @@ class TestTransformer(nn.Module):
         # tgt_key_padding_mask : (N, T)
 
         batch_size = batch_H.size(0)
-        num_steps = batch_max_length + 1  # +1 for [s] at end of sentence.
-
-        output_hiddens = torch.FloatTensor(batch_size, num_steps, self.input_size).fill_(0).to(device)
+        num_steps = batch_max_length + 2  # +1 for [s] at end of sentence.
 
         # src : (Batch, 1, Channel)
         batch_H = batch_H.permute(1, 0, 2) # (Batch, 1, Channel) -> (1, Batch, 256)
@@ -76,11 +74,18 @@ class Transformer(nn.Module):
     def __init__(self, input_size, num_classes):
         super(Transformer, self).__init__()
 
-        self.embedding = nn.Embedding(num_classes, input_size)
-        self.transformer = nn.Transformer(d_model=input_size, nhead=8, num_encoder_layers=6, 
-                                            num_decoder_layers=6, dim_feedforward=2048, 
-                                            dropout=0.1, activation='gelu')
-        self.generator = nn.Linear(input_size, num_classes, bias=False)
+        # Define the model
+        decoder_layer = nn.TransformerDecoderLayer(d_model=input_size, nhead=8, dim_feedforward=2048, 
+                                            dropout=0.1, activation='gelu').to(device)
+
+        self.decoder = nn.TransformerDecoder(decoder_layer=decoder_layer,
+                                        num_layers=6).to(device)
+
+        self.decoder_emb = nn.Embedding(num_classes, input_size)
+
+        self.predictor = nn.Linear(input_size, num_classes, bias=False)
+
+        self.sos_idx = 0
         self.pad_idx = 2
         self.num_classes = num_classes
         self.input_size = input_size
@@ -92,34 +97,31 @@ class Transformer(nn.Module):
         # tgt_key_padding_mask : (N, T)
 
         batch_size = batch_H.size(0)
-        num_steps = batch_max_length + 1  # +1 for [s] at end of sentence.
+        num_steps = batch_max_length + 2  # +1 for [s] at end of sentence.
 
-        output_hiddens = torch.FloatTensor(batch_size, num_steps, self.input_size).fill_(0).to(device)
-
-        # src : (Batch, 1, Channel)
-        batch_H = batch_H.permute(1, 0, 2) # (Batch, 1, Channel) -> (1, Batch, 256)
+        # src : (Batch, 29, Channel)
+        batch_H = batch_H.permute(1, 0, 2) # (Batch, 29, Channel) -> (1, Batch, 256)
 
         # text = (Bacth, Length)
         text = text.permute(1, 0) # (Batch, Length) -> (Length, Batch)
 
         if is_train:
-            for i in range(num_steps):
-                #trg_emb = (Batch, Channel)
-                trg_emb = self.embedding(text[i, :])
-                trg_emb = trg_emb.unsqueeze(0) #(Batch, Channel) -> (1, Batch, Channel)
-                
-                #trg_key_padding_mask = (Batch)
-                trg_key_padding_mask = (text[i, :] == self.pad_idx) # Need to fix pad_idx
-                trg_key_padding_mask = trg_key_padding_mask.unsqueeze(1) # (Batch) -> (Batch, 1)
+            #trg_emb = (Length, Batch, Channel)
+            trg_emb = self.decoder_emb(text)
 
-                # pred = (1, Batch, Channel)
-                pred = self.transformer(batch_H, trg_emb, tgt_key_padding_mask=trg_key_padding_mask)
-                pred = pred.permute(1, 0, 2) # (1, Batch, Channel) -> (Batch, 1, Channel)
-                pred = pred.squeeze(1) # (Batch, 1, Channel) -> (Batch, Channel)
+            #trg_key_padding_mask = (Length, Batch)
+            trg_key_padding_mask = (text == self.pad_idx)
+            trg_key_padding_mask = trg_key_padding_mask.permute(1, 0)
 
-                output_hiddens[:, i, :] = pred
-            probs = self.generator(output_hiddens)
-
+            decoder_output = self.decoder(tgt=trg_emb,
+                                        tgt_mask=trg_key_padding_mask,
+                                        memory=batch_H)
+            print(decoder_output.shape)
+            pred = decoder_output.permute(1, 0, 2) # (Length, Batch, Channel) -> (Batch, Length, Channel)
+            print(pred.shape)
+            pred = self.predictor(pred)
+            print(pred.shape)
+            return pred
         else:
             targets = torch.LongTensor(batch_size).fill_(0).to(device)  # [GO] token
             probs = torch.FloatTensor(batch_size, num_steps, self.num_classes).fill_(0).to(device)
@@ -174,7 +176,6 @@ class Attention(nn.Module):
         output_hiddens = torch.FloatTensor(batch_size, num_steps, self.hidden_size).fill_(0).to(device)
         hidden = (torch.FloatTensor(batch_size, self.hidden_size).fill_(0).to(device),
                   torch.FloatTensor(batch_size, self.hidden_size).fill_(0).to(device))
-
         if is_train:
             for i in range(num_steps):
                 # one-hot vectors for a i-th char. in a batch
