@@ -100,46 +100,51 @@ class Transformer(nn.Module):
         num_steps = batch_max_length + 2  # +1 for [s] at end of sentence.
 
         # src : (Batch, 29, Channel)
-        batch_H = batch_H.permute(1, 0, 2) # (Batch, 29, Channel) -> (1, Batch, 256)
+        batch_H = batch_H.permute(1, 0, 2) # (Batch, 29, Channel) -> (29, Batch, 256)
 
         # text = (Bacth, Length)
-        text = text.permute(1, 0) # (Batch, Length) -> (Length, Batch)
+        text = text.permute(1, 0) # (Batch, 12) -> (12, Batch)
 
         if is_train:
-            #trg_emb = (Length, Batch, Channel)
+            #trg_emb = (12, Batch, Channel)
             trg_emb = self.decoder_emb(text)
 
-            #trg_key_padding_mask = (Length, Batch)
+            #trg_key_padding_mask = (12, Batch)
             trg_key_padding_mask = (text == self.pad_idx)
             trg_key_padding_mask = trg_key_padding_mask.permute(1, 0)
-
+            
             decoder_output = self.decoder(tgt=trg_emb,
-                                        tgt_mask=trg_key_padding_mask,
+                                        tgt_key_padding_mask=trg_key_padding_mask,
                                         memory=batch_H)
-            print(decoder_output.shape)
             pred = decoder_output.permute(1, 0, 2) # (Length, Batch, Channel) -> (Batch, Length, Channel)
-            print(pred.shape)
             pred = self.predictor(pred)
-            print(pred.shape)
             return pred
         else:
             targets = torch.LongTensor(batch_size).fill_(0).to(device)  # [GO] token
+            # 32
+            targets = targets.unsqueeze(0)
+            # 1, 32
             probs = torch.FloatTensor(batch_size, num_steps, self.num_classes).fill_(0).to(device)
-
+            # 32, 12, 2994
             for i in range(num_steps):
                 #trg_emb = (Batch, Channel)
-                trg_emb = self.embedding(targets)
-                trg_emb = trg_emb.unsqueeze(0) #(Batch) -> (1, Batch)
+                trg_emb = self.decoder_emb(targets)
+                # 1, 32, 256
 
-                pred = self.transformer(batch_H, trg_emb)
+                pred =  self.decoder(tgt=trg_emb,
+                                        memory=batch_H)
                 pred = pred.permute(1, 0, 2) # (1, Batch, Channel) -> (Batch, 1, Channel)
-                pred = pred.squeeze(1) # (Batch, 1, Channel) -> (Batch, Channel)
-                pred = self.generator(pred) # (Batch, Vocab_size)
-
-                probs[:, i, :] = pred
-
-                _, next_input = pred.max(1)
-                targets = next_input
+                pred = self.predictor(pred) # (Batch, Vocab_size)
+                # 32 length 2994
+                pred_id = pred.max(2)[1] # (Batch, 1)
+                # 32 1
+                pred_id = pred_id[:, -1] # (Batch)
+                # 32
+                pred_id = pred_id.unsqueeze(0)
+                # 1, 32
+                targets = torch.cat([targets, pred_id], dim=0)
+                #32 2994
+                probs[:, i, :] = pred[:,i,:].squeeze(1)
 
         return probs  # batch_size x num_steps x num_classes
 
